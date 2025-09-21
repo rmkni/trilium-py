@@ -252,6 +252,49 @@ def extract_urls_from_text(text: str) -> list:
     return []
 
 
+def extract_article_title_from_url(url: str) -> str:
+    """
+    Extract article title from a URL using newspaper3k
+    
+    Args:
+        url: URL to extract title from
+        
+    Returns:
+        str: Article title or None if extraction fails
+    """
+    try:
+        article = Article(url)
+        article.download()
+        article.parse()
+        return article.title or None
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not extract title from {url}: {str(e)}[/yellow]")
+        return None
+
+
+def extract_article_title_from_content(content: str) -> str:
+    """
+    Extract article title from note content by finding URLs that start with http and end with #
+    
+    Args:
+        content: Note content to search for URLs
+        
+    Returns:
+        str: Article title or None if no URL found or extraction fails
+    """
+    # Use regex to find URLs that start with http and end with # (not including the #)
+    import re
+    url_pattern = r'(https?://[^#\s]+)(?=#)'
+    match = re.search(url_pattern, content)
+    
+    if not match:
+        return None
+    
+    # Extract title from the found URL
+    page_url = match.group(1)
+    return extract_article_title_from_url(page_url)
+
+
 def fetch_article_content(url: str) -> dict:
     """
     Fetch article content using newspaper3k and readability-lxml
@@ -284,6 +327,196 @@ def fetch_article_content(url: str) -> dict:
         return None
 
 
+def get_notes_by_title_and_date(etapi: ETAPI, title: str, date_str: str) -> list:
+    """
+    Find all notes with the exact title from the specified date
+    
+    Args:
+        etapi: ETAPI client instance
+        title: Note title to search for
+        date_str: Date string in format YYYY-MM-DD
+        
+    Returns:
+        list: List of notes with matching title from the specified date
+    """
+    try:
+        # Search for notes with exact title from the past 2 days to capture same-day notes
+        search_query = f'note.title = "{title}" note.dateCreated >= TODAY-2'
+        results = etapi.search_note(search=search_query)
+        
+        # Filter to only include notes from the same calendar day
+        filtered_results = []
+        for note in results.get('results', []):
+            note_date = note.get('dateCreated', '')[:10]  # Get just the date part
+            if note_date == date_str:
+                filtered_results.append(note)
+        
+        return filtered_results
+    except Exception as e:
+        console.print(f"[red]Error searching for notes by title and date: {e}[/red]")
+        return []
+
+
+def merge_lien_inclus_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
+    """
+    Process notes with #link label that start with "Lien inclus" by merging duplicates
+    and updating note titles with article titles extracted using newspaper3k.
+    Always looks for pageUrl and updates title, even if no duplicates exist.
+    
+    Args:
+        etapi: ETAPI client instance
+        notes: List of notes to process
+        verbose: Whether to show progress information
+        
+    Returns:
+        dict: Processing results with success/failure counts
+    """
+    results = {
+        'total': len(notes),
+        'processed': 0,
+        'merged': 0,
+        'titles_updated': 0,
+        'errors': []
+    }
+    
+    if verbose:
+        console.print(f"[blue]Processing 'Lien inclus' notes for merging and title updates...[/blue]")
+    
+    for note in track(notes, description="Processing 'Lien inclus' notes..."):
+        try:
+            note_id = note['noteId']
+            title = note['title'].strip()
+            
+            # Skip if not a "Lien inclus" note
+            if not title.startswith("Lien inclus"):
+                continue
+            
+            # Get the date of this note (format as YYYY-MM-DD for searching)
+            note_details = etapi.get_note(note_id)
+            date_created = note_details.get('dateCreated', '')[:10]  # Get just the date part
+            
+            # Find all notes with the same title from the same day
+            duplicate_notes = get_notes_by_title_and_date(etapi, title, date_created)
+            
+            # Determine which note to process (oldest if duplicates exist, current if not)
+            if len(duplicate_notes) <= 1:
+                # No duplicates found - process the current note
+                target_note = note
+                target_note_id = note_id
+                if verbose:
+                    console.print(f"[dim]No duplicates found for: {title} - processing current note[/dim]")
+            else:
+                # Duplicates found - merge them into the oldest note
+                # Sort by creation date to get the oldest first
+                duplicate_notes.sort(key=lambda x: x.get('dateCreated', ''))
+                
+                # Get the oldest note (first in sorted list)
+                target_note = duplicate_notes[0]
+                target_note_id = target_note['noteId']
+                
+                if verbose:
+                    console.print(f"[blue]Found {len(duplicate_notes)} duplicates for: {title}[/blue]")
+                
+                # Merge content from all duplicates into the oldest note
+                merged_content = []
+                links_found = []
+                
+                # Get content from the oldest note first
+                oldest_content = etapi.get_note_content(target_note_id)
+                merged_content.append(oldest_content)
+                
+                # Process each duplicate note
+                for dup_note in duplicate_notes[1:]:  # Skip the oldest one
+                    dup_note_id = dup_note['noteId']
+                    dup_content = etapi.get_note_content(dup_note_id)
+                    
+                    # Extract links from the content (look for URLs at the end)
+                    lines = dup_content.strip().split('\n')
+                    for line in reversed(lines):
+                        line = line.strip()
+                        if line.startswith('http://') or line.startswith('https://'):
+                            links_found.append(line)
+                            break  # Only take the last link
+                    
+                    # Add the content to merged content
+                    if dup_content.strip():
+                        merged_content.append(dup_content.strip())
+                    
+                    # Delete the duplicate note
+                    try:
+                        etapi.delete_note(dup_note_id)
+                        if verbose:
+                            console.print(f"[green]✓[/green] Deleted duplicate: {dup_note['title']} ({dup_note_id})")
+                    except Exception as delete_error:
+                        error_msg = f"Failed to delete duplicate note {dup_note_id}: {str(delete_error)}"
+                        results['errors'].append(error_msg)
+                        if verbose:
+                            console.print(f"[red]✗[/red] {error_msg}")
+                
+                # Update the oldest note with merged content
+                final_content = '\n\n'.join(merged_content)
+                etapi.update_note_content(target_note_id, final_content)
+                
+                results['merged'] += 1
+                if verbose:
+                    console.print(f"[green]✓[/green] Merged {len(duplicate_notes)} notes into: {target_note['title']}")
+            
+            # Always look for pageUrl and update title, regardless of duplicates
+            
+            # Get the current content of the target note
+            current_content = etapi.get_note_content(target_note_id)
+            
+            # Find the first HTTP link ending with # in the content
+            page_url = None
+            
+            # Use regex to find first string starting with http and ending with #
+            import re
+            # Pattern matches: http(s)://anything# (but excludes the # from the result)
+            url_pattern = r'(https?://[^#\s]+)(?=#)'
+            match = re.search(url_pattern, current_content)
+            
+            if match:
+                page_url = match.group(1)  # Get the URL without the trailing #
+            else:
+                # Fallback: look for any HTTP link in the content
+                lines = current_content.strip().split('\n')
+                for line in reversed(lines):
+                    line = line.strip()
+                    if line.startswith('http://') or line.startswith('https://'):
+                        page_url = line
+                        break
+            
+            # Add the link as a #pageUrl label if found
+            if page_url:
+                etapi.create_attribute(
+                    noteId=target_note_id,
+                    type='label',
+                    name='pageUrl',
+                    value=page_url,
+                    isInheritable=False
+                )
+                if verbose:
+                    console.print(f"[green]✓[/green] Added pageUrl label: {page_url}")
+                
+                # Extract article title using newspaper3k and update note title
+                article_title = extract_article_title_from_url(page_url)
+                if article_title:
+                    etapi.patch_note(target_note_id, title=article_title)
+                    results['titles_updated'] += 1
+                    if verbose:
+                        console.print(f"[green]✓[/green] Updated note title to: {article_title}")
+            
+            results['processed'] += 1
+                
+        except Exception as e:
+            error_msg = f"Error processing 'Lien inclus' note {note['title']}: {str(e)}"
+            results['errors'].append(error_msg)
+            if verbose:
+                console.print(f"[red]✗[/red] {error_msg}")
+    
+    return results
+
+
 def process_link_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
     """
     Process notes with #link label by extracting URLs and fetching content
@@ -307,7 +540,25 @@ def process_link_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
     if verbose:
         console.print(f"[blue]Processing link notes for URL content...[/blue]")
     
-    for note in track(notes, description="Processing link notes..."):
+    # Separate "Lien inclus" notes from regular link notes
+    lien_inclus_notes = []
+    regular_link_notes = []
+    
+    for note in notes:
+        if note['title'].strip().startswith("Lien inclus"):
+            lien_inclus_notes.append(note)
+        else:
+            regular_link_notes.append(note)
+    
+    # Process "Lien inclus" notes with merging logic
+    if lien_inclus_notes:
+        lien_results = merge_lien_inclus_notes(etapi, lien_inclus_notes, verbose)
+        results['processed'] += lien_results['processed']
+        results['merged'] = lien_results['merged']
+        results['errors'].extend(lien_results['errors'])
+    
+    # Process regular link notes with URL fetching (existing logic)
+    for note in track(regular_link_notes, description="Processing regular link notes..."):
         try:
             note_id = note['noteId']
             
@@ -315,13 +566,6 @@ def process_link_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
             if note['isProtected']:
                 if verbose:
                     console.print(f"[yellow]⚠[/yellow] Skipping protected note: {note['title']}")
-                continue
-            
-            # Skip notes with title starting with "Lien inclus : "
-            title = note['title'].strip()
-            if title.startswith("Lien inclus"):  
-                if verbose:
-                    console.print(f"[yellow]⚠[/yellow] Skipping 'Lien inclus' note: {title}")
                 continue
             
             # Only process text notes
@@ -464,8 +708,14 @@ def display_processing_summary(revision_results: dict, link_results: dict, link_
         
         table3.add_row("Total Notes", str(link_processing_results['total']))
         table3.add_row("Processed", str(link_processing_results['processed']))
-        table3.add_row("URLs Found", str(link_processing_results['urls_found']))
-        table3.add_row("Content Fetched", str(link_processing_results['content_fetched']))
+        if 'merged' in link_processing_results:
+            table3.add_row("Merged Groups", str(link_processing_results['merged']))
+        if 'titles_updated' in link_processing_results:
+            table3.add_row("Titles Updated", str(link_processing_results['titles_updated']))
+        if 'urls_found' in link_processing_results:
+            table3.add_row("URLs Found", str(link_processing_results['urls_found']))
+        if 'content_fetched' in link_processing_results:
+            table3.add_row("Content Fetched", str(link_processing_results['content_fetched']))
         table3.add_row("Errors", str(len(link_processing_results['errors'])))
         
         console.print(table3)
