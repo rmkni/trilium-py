@@ -87,13 +87,11 @@ def get_notes_created_in_past_day(etapi: ETAPI, days_back: int = 1) -> list:
     Returns:
         list: List of notes created in the specified period
     """
-    # Calculate the cutoff date
-    cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_back)
-    cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
     
     # Search for notes created after the cutoff date
     # Using dateCreated >= cutoff_date
-    search_query = f"note.dateCreated >= {cutoff_date_str}"
+        
+    search_query = f"note.dateCreated >= TODAY-{days_back}"
     
     try:
         results = etapi.search_note(search=search_query)
@@ -259,12 +257,13 @@ def display_processing_summary(revision_results: dict, link_results: dict):
 
 @click.command(help="Process daily notes: retrieve recent notes, save revisions, and add internal links")
 @click.option("--days-back", "-d", default=1, help="Number of days to look back (default: 1)")
+@click.option("--max-notes", "-m", default=100, type=int, help="Maximum number of notes to process (default: 100)")
 @click.option("--env-file", "-e", help="Path to .env file with token", 
               type=click.Path(exists=True, dir_okay=False, resolve_path=True))
 @click.option("--global", "is_global", is_flag=True, help="Use global ~/.trilium-py/.env file")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress output")
-def main(days_back: int, env_file: str, is_global: bool, verbose: bool, quiet: bool):
+def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose: bool, quiet: bool):
     """Process daily notes: retrieve notes created in the past day, save revisions, and add internal links."""
     try:
         # Load environment variables
@@ -308,8 +307,20 @@ def main(days_back: int, env_file: str, is_global: bool, verbose: bool, quiet: b
             console.print("[yellow]No notes found in the specified time period.[/yellow]")
             return
         
+        # Calculate and display the date range used for selection
+        cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_back)
+        cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
+        current_date_str = datetime.datetime.now().strftime('%Y-%m-%d')
+        
         if not quiet:
+            console.print(f"[dim]Date range: {cutoff_date_str} to {current_date_str}[/dim]")
             console.print(f"[green]Found {len(recent_notes)} notes created in the past {days_back} day(s)[/green]")
+        
+        # Apply max notes limit if specified
+        if max_notes is not None and len(recent_notes) > max_notes:
+            recent_notes = recent_notes[:max_notes]
+            if not quiet:
+                console.print(f"[yellow]Limited to processing {max_notes} notes (out of {len(recent_notes)} total)[/yellow]")
         
         # Process revisions
         revision_results = process_note_revisions(etapi, recent_notes, verbose and not quiet)

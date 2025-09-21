@@ -181,6 +181,25 @@ Starting upload...
 ✓ Successfully uploaded Markdown files to 'import-test'
 ```
 
+Processing Summary
+Revision Processing Results
+┏━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Metric        ┃ Value ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ Total Notes   │ 5     │
+│ Successful    │ 5     │
+│ Failed        │ 0     │
+└───────────────┴───────┘
+Internal Link Processing Results
+┏━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Metric        ┃ Value ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ Total Notes   │ 5     │
+│ Processed     │ 5     │
+│ Errors        │ 0     │
+└───────────────┴───────┘
+
+✓ Daily notes processing completed successfully!
 ### Daily Notes Processor
 
 Automatically process notes created in the past day by saving revisions and adding internal links.
@@ -194,6 +213,8 @@ Usage: daily_notes_processor.py [OPTIONS]
 
 Options:
   -d, --days-back INTEGER  Number of days to look back (default: 1)
+  -m, --max-notes INTEGER  Maximum number of notes to process (default: no
+                           limit)
   -e, --env-file FILE    Path to .env file with token
   --global               Use global ~/.trilium-py/.env file
   -v, --verbose          Enable verbose output
@@ -212,6 +233,7 @@ Connecting to Trilium server...
 ✓ Connected to Trilium 0.92.3-beta
 
 Retrieving notes created in the past 1 day(s)...
+Date range: 2025-03-13 to 2025-03-14
 Found 5 notes created in the past 1 day(s)
 Processing revisions for 5 notes...
 ✓ Revision saved for: Meeting Notes
@@ -225,6 +247,53 @@ Adding internal links to 5 notes...
 ✓ Processed internal links for: Daily Journal
 ✓ Processed internal links for: Research Notes
 ✓ Processed internal links for: Code Snippets
+Processing Summary
+Revision Processing Results
+┏━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Metric        ┃ Value ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ Total Notes   │ 5     │
+│ Successful    │ 5     │
+│ Failed        │ 0     │
+└───────────────┴───────┘
+Internal Link Processing Results
+┏━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Metric        ┃ Value ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ Total Notes   │ 5     │
+│ Processed     │ 5     │
+│ Errors        │ 0     │
+└───────────────┴───────┘
+
+✓ Daily notes processing completed successfully!
+```
+
+**New Features:**
+
+- **Max Notes Limit**: Use `-m/--max-notes` to limit the number of notes processed (default: 10). Useful when you have many notes and want to process only a subset.
+- **Date Range Display**: The script now shows the date range used for note selection (e.g., "Date range: 2025-03-13 to 2025-03-14").
+
+Example with max notes limit:
+```shell
+❯ uv run daily_notes_processor.py -d 7 --max-notes 20
+Retrieving notes created in the past 7 day(s)...
+Date range: 2025-03-07 to 2025-03-14
+Found 25 notes created in the past 7 day(s)
+Limited to processing 20 notes (out of 25 total)
+Processing revisions for 20 notes...
+...
+```
+
+Example using default limit (10 notes):
+```shell
+❯ uv run daily_notes_processor.py -d 7
+Retrieving notes created in the past 7 day(s)...
+Date range: 2025-03-07 to 2025-03-14
+Found 25 notes created in the past 7 day(s)
+Limited to processing 10 notes (out of 25 total)
+Processing revisions for 10 notes...
+...
+```
 ==================================================
 Processing Summary
 ==================================================
