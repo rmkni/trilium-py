@@ -2,7 +2,14 @@
 Daily Notes Processor for Trilium
 
 This script retrieves notes created in the past day, saves revisions of those notes,
-and automatically adds internal links to them.
+adds internal links to them, and processes notes with #link labels by fetching
+URL content using newspaper3k.
+
+For notes with #link labels, the script will:
+- Extract URLs from the note content
+- Fetch article content using newspaper3k
+- Add a #url="insert url here" tag to the note
+- Append the fetched content to the note
 
 Usage:
     uv run daily_notes_processor.py [OPTIONS]
@@ -19,6 +26,10 @@ The script will look for .env files in the following locations (in order):
 #   "click",
 #   "rich",
 #   "python-dateutil",
+#   "newspaper3k",
+#   "requests",
+#   "lxml-html-clean",
+#   "readability-lxml",
 # ]
 # ///
 
@@ -26,6 +37,8 @@ import os
 import sys
 import click
 import datetime
+import re
+import urllib.parse
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
@@ -33,6 +46,9 @@ from rich.table import Table
 from rich.progress import track
 from dotenv import load_dotenv
 from dateutil import parser as date_parser
+import newspaper
+from newspaper import Article
+from newspaper.article import ArticleException
 
 from trilium_py.client import ETAPI
 
@@ -187,6 +203,12 @@ def add_internal_links_to_notes(etapi: ETAPI, notes: list, verbose: bool = True)
                     console.print(f"[yellow]⚠[/yellow] Skipping protected note: {note['title']}")
                 continue
             
+            # Skip notes with title starting with "Lien inclus : "
+            if note['title'].startswith("Lien inclus : "):
+                if verbose:
+                    console.print(f"[yellow]⚠[/yellow] Skipping 'Lien inclus' note: {note['title']}")
+                continue
+            
             # Only process text notes
             if note['type'] != 'text':
                 if verbose:
@@ -212,13 +234,198 @@ def add_internal_links_to_notes(etapi: ETAPI, notes: list, verbose: bool = True)
     return results
 
 
-def display_processing_summary(revision_results: dict, link_results: dict):
+def extract_urls_from_text(text: str) -> list:
+    """
+    Extract URLs from text content
+    
+    Args:
+        text: Text content to search for URLs
+        
+    Returns:
+        list: List of found URLs
+    """
+    # Check if the text is a URL
+    text = text.strip()
+    if text.startswith('http://') or text.startswith('https://'):
+        return [text]
+    
+    return []
+
+
+def fetch_article_content(url: str) -> dict:
+    """
+    Fetch article content using newspaper3k and readability-lxml
+    
+    Args:
+        url: URL to fetch content from
+        
+    Returns:
+        dict: Dictionary containing article title, text, and metadata
+    """
+    try:
+        article = Article(url)
+        article.download()
+        article.parse()
+        
+        # Use readability-lxml to extract main content
+        from readability import Document
+        doc = Document(article.html)
+        main_content_html = doc.summary()
+        
+        return {
+            'title': article.title or 'Untitled',
+            'html': main_content_html or '',
+            'authors': article.authors or [],
+            'publish_date': article.publish_date,
+            'url': url
+        }
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not fetch content from {url}: {str(e)}[/yellow]")
+        return None
+
+
+def process_link_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
+    """
+    Process notes with #link label by extracting URLs and fetching content
+    
+    Args:
+        etapi: ETAPI client instance
+        notes: List of notes to process
+        verbose: Whether to show progress information
+        
+    Returns:
+        dict: Processing results with success/failure counts
+    """
+    results = {
+        'total': len(notes),
+        'processed': 0,
+        'urls_found': 0,
+        'content_fetched': 0,
+        'errors': []
+    }
+    
+    if verbose:
+        console.print(f"[blue]Processing link notes for URL content...[/blue]")
+    
+    for note in track(notes, description="Processing link notes..."):
+        try:
+            note_id = note['noteId']
+            
+            # Skip protected notes
+            if note['isProtected']:
+                if verbose:
+                    console.print(f"[yellow]⚠[/yellow] Skipping protected note: {note['title']}")
+                continue
+            
+            # Skip notes with title starting with "Lien inclus : "
+            title = note['title'].strip()
+            if title.startswith("Lien inclus"):  
+                if verbose:
+                    console.print(f"[yellow]⚠[/yellow] Skipping 'Lien inclus' note: {title}")
+                continue
+            
+            # Only process text notes
+            if note['type'] != 'text':
+                if verbose:
+                    console.print(f"[yellow]⚠[/yellow] Skipping non-text note: {note['title']}")
+                continue
+            
+            # Get note content
+            content = etapi.get_note_content(note_id)
+            
+            # Extract URLs from content
+            urls = extract_urls_from_text(content)
+            
+            if not urls:
+                if verbose:
+                    console.print(f"[dim]No URLs found in: {note['title']}[/dim]")
+                continue
+            
+            results['urls_found'] += len(urls)
+            
+            # Process each URL found
+            for url in urls:
+                try:
+                    # Fetch article content
+                    article_data = fetch_article_content(url)
+                    
+                    if not article_data:
+                        continue
+                    
+                    # Create attributes for metadata instead of adding to content
+                    
+                    # Add URL attribute
+                    etapi.create_attribute(
+                        noteId=note_id,
+                        type='label',
+                        name='pageUrl',
+                        value=url,
+                        isInheritable=False
+                    )
+                    
+                    # Add authors attribute if available
+                    if article_data['authors']:
+                        etapi.create_attribute(
+                            noteId=note_id,
+                            type='label',
+                            name='authors',
+                            value=', '.join(article_data['authors']),
+                            isInheritable=False
+                        )
+                    
+                    # Add publish date attribute if available
+                    if article_data['publish_date']:
+                        publish_date_str = article_data['publish_date'].strftime('%Y-%m-%d') if hasattr(article_data['publish_date'], 'strftime') else str(article_data['publish_date'])
+                        etapi.create_attribute(
+                            noteId=note_id,
+                            type='label',
+                            name='date',
+                            value=publish_date_str,
+                            isInheritable=False
+                        )
+                    
+                    # Add template relation attribute
+                    etapi.create_attribute(
+                        noteId=note_id,
+                        type='relation',
+                        name='template',
+                        value='OYj9NF0MjC4X',
+                        isInheritable=False
+                    )
+                    
+    
+                    # Update the note content
+                    etapi.update_note_content(note_id, content=article_data['html'])
+                    results['content_fetched'] += 1
+                    
+                    if verbose:
+                        console.print(f"[green]✓[/green] Updated note '{note['title']}' with content from {url}")
+                    
+                except Exception as url_error:
+                    error_msg = f"Error processing URL {url} in note {note['title']}: {str(url_error)}"
+                    results['errors'].append(error_msg)
+                    if verbose:
+                        console.print(f"[red]✗[/red] {error_msg}")
+            
+            results['processed'] += 1
+            
+        except Exception as e:
+            error_msg = f"Error processing link note {note['title']}: {str(e)}"
+            results['errors'].append(error_msg)
+            if verbose:
+                console.print(f"[red]✗[/red] {error_msg}")
+    
+    return results
+
+
+def display_processing_summary(revision_results: dict, link_results: dict, link_processing_results: dict = None):
     """
     Display a summary of the processing results
     
     Args:
         revision_results: Results from revision processing
         link_results: Results from internal link processing
+        link_processing_results: Results from link note processing (optional)
     """
     console.print("\n" + "="*50)
     console.print("[bold cyan]Processing Summary[/bold cyan]")
@@ -249,13 +456,30 @@ def display_processing_summary(revision_results: dict, link_results: dict):
     
     console.print(table2)
     
-    if revision_results['errors'] or link_results['errors']:
+    # Link processing summary (if available)
+    if link_processing_results:
+        table3 = Table(title="Link Note Processing Results")
+        table3.add_column("Metric", style="cyan")
+        table3.add_column("Value", style="green")
+        
+        table3.add_row("Total Notes", str(link_processing_results['total']))
+        table3.add_row("Processed", str(link_processing_results['processed']))
+        table3.add_row("URLs Found", str(link_processing_results['urls_found']))
+        table3.add_row("Content Fetched", str(link_processing_results['content_fetched']))
+        table3.add_row("Errors", str(len(link_processing_results['errors'])))
+        
+        console.print(table3)
+    
+    if revision_results['errors'] or link_results['errors'] or (link_processing_results and link_processing_results['errors']):
         console.print("\n[red]Errors encountered:[/red]")
-        for error in revision_results['errors'] + link_results['errors']:
+        all_errors = revision_results['errors'] + link_results['errors']
+        if link_processing_results:
+            all_errors.extend(link_processing_results['errors'])
+        for error in all_errors:
             console.print(f"  • {error}")
 
 
-@click.command(help="Process daily notes: retrieve recent notes, save revisions, and add internal links")
+@click.command(help="Process daily notes: retrieve recent notes, save revisions, add internal links, and fetch URL content for #link labeled notes")
 @click.option("--days-back", "-d", default=1, help="Number of days to look back (default: 1)")
 @click.option("--max-notes", "-m", default=100, type=int, help="Maximum number of notes to process (default: 100)")
 @click.option("--env-file", "-e", help="Path to .env file with token", 
@@ -264,7 +488,7 @@ def display_processing_summary(revision_results: dict, link_results: dict):
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress output")
 def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose: bool, quiet: bool):
-    """Process daily notes: retrieve notes created in the past day, save revisions, and add internal links."""
+    """Process daily notes: retrieve recent notes, save revisions, add internal links, and fetch URL content for notes with #link labels."""
     try:
         # Load environment variables
         env_path = Path(env_file) if env_file else None
@@ -322,15 +546,39 @@ def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose
             if not quiet:
                 console.print(f"[yellow]Limited to processing {max_notes} notes (out of {len(recent_notes)} total)[/yellow]")
         
-        # Process revisions
-        revision_results = process_note_revisions(etapi, recent_notes, verbose and not quiet)
+        # Filter notes with #link label
+        link_notes = []
+        other_notes = []
         
-        # Add internal links
-        link_results = add_internal_links_to_notes(etapi, recent_notes, verbose and not quiet)
+        for note in recent_notes:
+            # Check if note has #link label by searching for it
+            search_result = etapi.search_note(search=f"note.noteId = '{note['noteId']}' #link")
+            if search_result.get('results'):
+                link_notes.append(note)
+            else:
+                other_notes.append(note)
+        
+        if not quiet and link_notes:
+            console.print(f"[blue]Found {len(link_notes)} notes with #link label[/blue]")
+        
+        # Process revisions only for notes that will get internal links (not link notes)
+        # This ensures we save revisions before modifying content
+        if other_notes:
+            revision_results = process_note_revisions(etapi, other_notes, verbose and not quiet)
+        else:
+            revision_results = {'total': 0, 'successful': 0, 'failed': 0, 'errors': []}
+        
+        # Add internal links only for notes without #link label
+        link_results = add_internal_links_to_notes(etapi, other_notes, verbose and not quiet)
+        
+        # Process link notes (URL fetching and content addition) - no revisions saved for these
+        link_processing_results = None
+        if link_notes:
+            link_processing_results = process_link_notes(etapi, link_notes, verbose and not quiet)
         
         # Display summary
         if not quiet:
-            display_processing_summary(revision_results, link_results)
+            display_processing_summary(revision_results, link_results, link_processing_results)
         
         console.print("\n[bold green]✓ Daily notes processing completed successfully![/bold green]")
         

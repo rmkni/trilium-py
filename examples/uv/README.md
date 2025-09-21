@@ -202,24 +202,29 @@ Internal Link Processing Results
 ✓ Daily notes processing completed successfully!
 ### Daily Notes Processor
 
-Automatically process notes created in the past day by saving revisions and adding internal links.
+Automatically process notes created in the past day by saving revisions, adding internal links, and fetching URL content for notes with #link labels.
+
+**New Features:**
+- **Link Processing**: Notes with `#link` labels are automatically processed to extract URLs and fetch article content
+- **URL Content Fetching**: Uses newspaper3k to fetch article content from URLs found in notes
+- **Automatic Tagging**: Adds `#url="insert url here"` tags to processed notes
+- **Content Integration**: Appends fetched article content to the original note
 
 ```shell
 ❯ uv run daily_notes_processor.py --help
 Usage: daily_notes_processor.py [OPTIONS]
 
-  Process daily notes: retrieve recent notes, save revisions, and add internal
-  links
+  Process daily notes: retrieve recent notes, save revisions, add internal
+  links, and fetch URL content for #link labeled notes
 
 Options:
   -d, --days-back INTEGER  Number of days to look back (default: 1)
-  -m, --max-notes INTEGER  Maximum number of notes to process (default: no
-                           limit)
-  -e, --env-file FILE    Path to .env file with token
-  --global               Use global ~/.trilium-py/.env file
-  -v, --verbose          Enable verbose output
-  -q, --quiet            Suppress progress output
-  --help                 Show this message and exit.
+  -m, --max-notes INTEGER  Maximum number of notes to process (default: 100)
+  -e, --env-file FILE      Path to .env file with token
+  --global                 Use global ~/.trilium-py/.env file
+  -v, --verbose            Enable verbose output
+  -q, --quiet              Suppress progress output
+  --help                   Show this message and exit.
 ```
 
 ```shell
@@ -235,6 +240,7 @@ Connecting to Trilium server...
 Retrieving notes created in the past 1 day(s)...
 Date range: 2025-03-13 to 2025-03-14
 Found 5 notes created in the past 1 day(s)
+Found 2 notes with #link label
 Processing revisions for 5 notes...
 ✓ Revision saved for: Meeting Notes
 ✓ Revision saved for: Project Ideas
@@ -247,6 +253,9 @@ Adding internal links to 5 notes...
 ✓ Processed internal links for: Daily Journal
 ✓ Processed internal links for: Research Notes
 ✓ Processed internal links for: Code Snippets
+Processing link notes for URL content...
+✓ Updated note 'Interesting Article' with content from https://example.com/article
+✓ Updated note 'Tech News' with content from https://techcrunch.com/story
 Processing Summary
 Revision Processing Results
 ┏━━━━━━━━━━━━━━━┳━━━━━━━┓
@@ -264,8 +273,53 @@ Internal Link Processing Results
 │ Processed     │ 5     │
 │ Errors        │ 0     │
 └───────────────┴───────┘
+Link Note Processing Results
+┏━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Metric        ┃ Value ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ Total Notes   │ 2     │
+│ Processed     │ 2     │
+│ URLs Found    │ 3     │
+│ Content Fetched│ 2     │
+│ Errors        │ 0     │
+└───────────────┴───────┘
 
 ✓ Daily notes processing completed successfully!
+```
+
+**How Link Processing Works:**
+
+1. **Detection**: The script identifies notes with the `#link` label
+2. **URL Extraction**: Extracts URLs from the note content using regex patterns
+3. **Content Fetching**: Uses newspaper3k to fetch article content from each URL
+4. **Note Updates**: 
+   - Adds `#url="insert url here"` tag to the note
+   - Appends the fetched article content below the original content
+   - Includes metadata like authors and publication date when available
+
+**Example Note Transformation:**
+
+**Before:**
+```
+#link
+
+Check out this interesting article: https://example.com/article
+```
+
+**After:**
+```
+#url="https://example.com/article"
+#link
+
+Check out this interesting article: https://example.com/article
+
+---
+**Content from https://example.com/article:**
+
+[Full article text here]
+
+**Authors:** John Doe, Jane Smith
+**Published:** 2025-03-14
 ```
 
 **New Features:**
