@@ -174,9 +174,75 @@ Starting upload...
 2025-03-18 05:31:14.652 | INFO     | trilium_py.client:upload_md_folder:1171 - /var/home/matt/dev/trilium-py/examples/uv/sample/logseq/sample-2.md
 2025-03-18 05:31:14.652 | INFO     | trilium_py.client:upload_md_file:951 - /var/home/matt/dev/trilium-py/examples/uv/sample/logseq/sample-2.md
 2025-03-18 05:31:14.706 | INFO     | trilium_py.client:upload_md_file:1003 - found images:
-2025-03-18 05:31:14.706 | INFO     | trilium_py.client:upload_md_file:1004 - ['src="./assets/2021-02-19-14_05_19-Window.png" alt="img" /']
+2025-03-18 05:31:14.706 | INFO     | trilium_client:upload_md_file:1004 - ['src="./assets/2021-02-19-14_05_19-Window.png" alt="img" /']
 2025-03-18 05:31:14.757 | INFO     | trilium_py.client:upload_md_file:1061 - api/images/MMVi0YUHnpuo/img
 ...snip...
 2025-03-18 05:31:14.961 | INFO     | trilium_py.client:upload_md_folder:1177 - dirs
 ✓ Successfully uploaded Markdown files to 'import-test'
 ```
+
+### Daily Notes Processor
+
+Automatically process notes created in the past day by saving revisions and adding internal links.
+
+```shell
+❯ uv run daily_notes_processor.py --help
+Usage: daily_notes_processor.py [OPTIONS]
+
+  Process daily notes: retrieve recent notes, save revisions, and add internal
+  links
+
+Options:
+  -d, --days-back INTEGER  Number of days to look back (default: 1)
+  -e, --env-file FILE    Path to .env file with token
+  --global               Use global ~/.trilium-py/.env file
+  -v, --verbose          Enable verbose output
+  -q, --quiet            Suppress progress output
+  --help                 Show this message and exit.
+```
+
+```shell
+❯ uv run daily_notes_processor.py -d 1 --verbose
+╭─────────────────────── Connection Information ───────────────────────╮
+│ Configuration Source: /var/home/matt/dev/trilium-py/examples/uv/.env │
+│ Server URL: http://localhost:8080                                    │
+│ Token: ********...mqo=                                               │
+╰──────────────────────────────────────────────────────────────────────╯
+Connecting to Trilium server...
+✓ Connected to Trilium 0.92.3-beta
+
+Retrieving notes created in the past 1 day(s)...
+Found 5 notes created in the past 1 day(s)
+Processing revisions for 5 notes...
+✓ Revision saved for: Meeting Notes
+✓ Revision saved for: Project Ideas
+✓ Revision saved for: Daily Journal
+✓ Revision saved for: Research Notes
+✓ Revision saved for: Code Snippets
+Adding internal links to 5 notes...
+✓ Processed internal links for: Meeting Notes
+✓ Processed internal links for: Project Ideas
+✓ Processed internal links for: Daily Journal
+✓ Processed internal links for: Research Notes
+✓ Processed internal links for: Code Snippets
+==================================================
+Processing Summary
+==================================================
+Revision Processing Results
+┏━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Metric        ┃ Value ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ Total Notes   │ 5     │
+│ Successful    │ 5     │
+│ Failed        │ 0     │
+└───────────────┴───────┘
+Internal Link Processing Results
+┏━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Metric        ┃ Value ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ Total Notes   │ 5     │
+│ Processed     │ 5     │
+│ Errors        │ 0     │
+└───────────────┴───────┘
+
+✓ Daily notes processing completed successfully!
