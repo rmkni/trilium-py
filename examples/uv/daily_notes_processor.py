@@ -19,6 +19,7 @@ The script will look for .env files in the following locations (in order):
 2. ~/.trilium-py/.env (if --global flag is used)
 3. Custom path specified with --env-file
 """
+
 # /// script
 # dependencies = [
 #   "trilium-py",
@@ -30,8 +31,10 @@ The script will look for .env files in the following locations (in order):
 #   "requests",
 #   "lxml-html-clean",
 #   "readability-lxml",
+#   "beautifulsoup4",
 # ]
 # ///
+
 
 import os
 import sys
@@ -49,6 +52,8 @@ from dateutil import parser as date_parser
 import newspaper
 from newspaper import Article
 from newspaper.article import ArticleException
+from bs4 import BeautifulSoup
+import html as html_module
 
 from trilium_py.client import ETAPI
 
@@ -114,6 +119,31 @@ def get_notes_created_in_past_day(etapi: ETAPI, days_back: int = 1) -> list:
         return results.get('results', [])
     except Exception as e:
         console.print(f"[red]Error searching for notes: {e}[/red]")
+        return []
+
+
+def get_notes_modified_in_past_days(etapi: ETAPI, days_back: int = 1) -> list:
+    """
+    Retrieve notes modified in the past specified number of days
+    
+    Args:
+        etapi: ETAPI client instance
+        days_back: Number of days to look back (default: 1)
+        
+    Returns:
+        list: List of notes modified in the specified period
+    """
+    
+    # Search for notes modified after the cutoff date
+    # Using dateModified >= cutoff_date
+        
+    search_query = f"note.dateModified >= TODAY-{days_back}"
+    
+    try:
+        results = etapi.search_note(search=search_query)
+        return results.get('results', [])
+    except Exception as e:
+        console.print(f"[red]Error searching for modified notes: {e}[/red]")
         return []
 
 
@@ -629,13 +659,13 @@ def process_link_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
                         )
                     
                     # Add template relation attribute
-                    etapi.create_attribute(
-                        noteId=note_id,
-                        type='relation',
-                        name='template',
-                        value='OYj9NF0MjC4X',
-                        isInheritable=False
-                    )
+                    # etapi.create_attribute(
+                    #     noteId=note_id,
+                    #     type='relation',
+                    #     name='template',
+                    #     value='OYj9NF0MjC4X',
+                    #     isInheritable=False
+                    # )
                     
     
                     # Update the note content
@@ -662,7 +692,202 @@ def process_link_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
     return results
 
 
-def display_processing_summary(revision_results: dict, link_results: dict, link_processing_results: dict = None):
+
+def process_read_notes(etapi: ETAPI, notes: list, verbose: bool = True) -> dict:
+    """
+    Process notes with #clipType label by reading note content, 
+    extracting HTML tags with background color OR links, 
+    removing background colors from highlights,
+    recreating note content with only extracted highlighted text and links,
+    and merging into paragraphs while preserving original paragraph structure
+    
+    Args:
+        etapi: ETAPI client instance
+        notes: List of notes to process
+        verbose: Whether to show progress information
+        
+    Returns:
+        dict: Processing results with success/failure counts
+    """
+    results = {
+        'total': len(notes),
+        'processed': 0,
+        'highlights_extracted': 0,
+        'errors': []
+    }
+    
+    if verbose:
+        console.print(f"[blue]Processing read notes for highlighted content and links...[/blue]")
+    
+    for note in track(notes, description="Processing read notes..."):
+        try:
+            note_id = note['noteId']
+            
+            # Skip protected notes
+            if note['isProtected']:
+                if verbose:
+                    console.print(f"[yellow]⚠[/yellow] Skipping protected note: {note['title']}")
+                continue
+            
+            # Only process text notes
+            if note['type'] != 'text':
+                if verbose:
+                    console.print(f"[yellow]⚠[/yellow] Skipping non-text note: {note['title']}")
+                continue
+            
+            # Get note content
+            content = etapi.get_note_content(note_id)
+            
+            if not content.strip():
+                if verbose:
+                    console.print(f"[dim]No content found in: {note['title']}[/dim]")
+                continue
+            
+            # Parse HTML content
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            extracted_elements_with_context = []
+            
+            # Function to check if element has background color
+            def has_background_color(element):
+                if not hasattr(element, 'get'):
+                    return False
+                style = element.get('style', '').lower()
+                return 'background-color' in style
+            
+            # Function to remove background color from an element
+            def remove_background_color(element):
+                """Remove background-color from style attribute"""
+                if hasattr(element, 'get') and element.get('style'):
+                    style = element['style']
+                    # Remove background-color property
+                    import re
+                    style = re.sub(r'background-color\s*:\s*[^;]+;?', '', style)
+                    style = re.sub(r';\s*$', '', style)  # Clean up trailing semicolon
+                    if style.strip():
+                        element['style'] = style
+                    else:
+                        del element['style']
+                
+                # Process children recursively - only if element has contents and is a tag
+                if hasattr(element, 'contents') and hasattr(element, 'name'):
+                    for child in element.contents:
+                        if hasattr(child, 'name') and child.name:  # It's a tag element, not text
+                            try:
+                                remove_background_color(child)
+                            except AttributeError:
+                                # Skip if child doesn't support these operations
+                                continue
+            
+            # Function to get paragraph context
+            def get_paragraph_context(element):
+                """Get the paragraph element that contains this element"""
+                parent = element.parent
+                while parent and parent.name not in ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    parent = parent.parent
+                return parent
+            
+            # Use a set to track processed elements to avoid duplicates
+            processed_element_ids = set()
+            
+            # First, collect all elements that should be extracted in document order
+            for element in soup.find_all():
+                element_id = id(element)
+                
+                # Skip if already processed
+                if element_id in processed_element_ids:
+                    continue
+                
+                # Check if element has background color OR is a link
+                if has_background_color(element) or (element.name == 'a' and element.get('href')):
+                    # Mark this element and all its descendants as processed
+                    processed_element_ids.add(element_id)
+                    for descendant in element.find_all():
+                        processed_element_ids.add(id(descendant))
+                    
+                    # Get paragraph context
+                    paragraph_context = get_paragraph_context(element)
+                    
+                    # Create a copy for processing
+                    element_copy = element.__copy__()
+                    
+                    # Remove background color from ALL extracted elements (both highlights and links)
+                    # This handles cases where links might also have background colors
+                    remove_background_color(element_copy)
+                    
+                    extracted_elements_with_context.append({
+                        'element': element_copy,
+                        'paragraph': paragraph_context,
+                        'original_element': element
+                    })
+            
+            # Process extracted elements with context
+            if extracted_elements_with_context:
+                paragraphs = []
+                current_paragraph_elements = []
+                current_paragraph_tag = None
+                
+                # Group elements by their original paragraph context
+                for item in extracted_elements_with_context:
+                    element = item['element']
+                    paragraph_context = item['paragraph']
+                    
+                    # If this is a new paragraph context, finish the current one
+                    if paragraph_context != current_paragraph_tag:
+                        if current_paragraph_elements:
+                            # Finish previous paragraph
+                            if current_paragraph_elements:
+                                paragraph_content = ' '.join(str(elem) for elem in current_paragraph_elements)
+                                if paragraph_content.strip():
+                                    # Try to reconstruct the original paragraph structure
+                                    if current_paragraph_tag and current_paragraph_tag.name in ['p', 'div']:
+                                        paragraphs.append(f'<{current_paragraph_tag.name}>{paragraph_content.strip()}</{current_paragraph_tag.name}>')
+                                    else:
+                                        paragraphs.append(f'<p>{paragraph_content.strip()}</p>')
+                        current_paragraph_elements = []
+                        current_paragraph_tag = paragraph_context
+                    
+                    # Add element to current paragraph
+                    current_paragraph_elements.append(element)
+                
+                # Don't forget the last paragraph
+                if current_paragraph_elements:
+                    paragraph_content = ' '.join(str(elem) for elem in current_paragraph_elements)
+                    if paragraph_content.strip():
+                        if current_paragraph_tag and current_paragraph_tag.name in ['p', 'div']:
+                            paragraphs.append(f'<{current_paragraph_tag.name}>{paragraph_content.strip()}</{current_paragraph_tag.name}>')
+                        else:
+                            paragraphs.append(f'<p>{paragraph_content.strip()}</p>')
+                
+                # Create final content
+                if paragraphs:
+                    final_content = '\n'.join(paragraphs)
+                    
+                    # Update note content with extracted elements
+                    etapi.update_note_content(note_id, content=final_content)
+                    results['highlights_extracted'] += 1
+                    
+                    if verbose:
+                        console.print(f"[green]✓[/green] Extracted {len(extracted_elements_with_context)} elements from: {note['title']}")
+                else:
+                    if verbose:
+                        console.print(f"[yellow]⚠[/yellow] No valid content found in extracted elements for: {note['title']}")
+            else:
+                if verbose:
+                    console.print(f"[yellow]⚠[/yellow] No highlighted text or links found in: {note['title']}")
+            
+            results['processed'] += 1
+            
+        except Exception as e:
+            error_msg = f"Error processing read note {note['title']}: {str(e)}"
+            results['errors'].append(error_msg)
+            if verbose:
+                console.print(f"[red]✗[/red] {error_msg}")
+    
+    return results
+
+
+def display_processing_summary(revision_results: dict, link_results: dict, link_processing_results: dict = None, read_processing_results: dict = None):
     """
     Display a summary of the processing results
     
@@ -670,6 +895,7 @@ def display_processing_summary(revision_results: dict, link_results: dict, link_
         revision_results: Results from revision processing
         link_results: Results from internal link processing
         link_processing_results: Results from link note processing (optional)
+        read_processing_results: Results from read note processing (optional)
     """
     console.print("\n" + "="*50)
     console.print("[bold cyan]Processing Summary[/bold cyan]")
@@ -720,16 +946,36 @@ def display_processing_summary(revision_results: dict, link_results: dict, link_
         
         console.print(table3)
     
-    if revision_results['errors'] or link_results['errors'] or (link_processing_results and link_processing_results['errors']):
+    if read_processing_results:
+        table4 = Table(title="Read Note Processing Results")
+        table4.add_column("Metric", style="cyan")
+        table4.add_column("Value", style="green")
+        
+        table4.add_row("Total Notes", str(read_processing_results['total']))
+        table4.add_row("Processed", str(read_processing_results['processed']))
+        if 'highlights_extracted' in read_processing_results:
+            table4.add_row("Highlights Extracted", str(read_processing_results['highlights_extracted']))
+        table4.add_row("Errors", str(len(read_processing_results['errors'])))
+        
+        console.print(table4)
+    
+    # Combine all errors
+    all_errors = []
+    all_errors.extend(revision_results['errors'])
+    all_errors.extend(link_results['errors'])
+    if link_processing_results:
+        all_errors.extend(link_processing_results['errors'])
+    if read_processing_results:
+        all_errors.extend(read_processing_results['errors'])
+    
+    if all_errors:
         console.print("\n[red]Errors encountered:[/red]")
-        all_errors = revision_results['errors'] + link_results['errors']
-        if link_processing_results:
-            all_errors.extend(link_processing_results['errors'])
         for error in all_errors:
             console.print(f"  • {error}")
 
 
 @click.command(help="Process daily notes: retrieve recent notes, save revisions, add internal links, and fetch URL content for #link labeled notes")
+@click.option("--note-id", help="Process only this specific note ID (overrides --days-back)")
 @click.option("--days-back", "-d", default=1, help="Number of days to look back (default: 1)")
 @click.option("--max-notes", "-m", default=100, type=int, help="Maximum number of notes to process (default: 100)")
 @click.option("--env-file", "-e", help="Path to .env file with token", 
@@ -737,7 +983,7 @@ def display_processing_summary(revision_results: dict, link_results: dict, link_
 @click.option("--global", "is_global", is_flag=True, help="Use global ~/.trilium-py/.env file")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress output")
-def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose: bool, quiet: bool):
+def main(note_id: str, days_back: int, max_notes: int, env_file: str, is_global: bool, verbose: bool, quiet: bool):
     """Process daily notes: retrieve recent notes, save revisions, add internal links, and fetch URL content for notes with #link labels."""
     try:
         # Load environment variables
@@ -771,15 +1017,47 @@ def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose
         if not quiet:
             console.print(f"[green]✓[/green] Connected to Trilium {app_info['appVersion']}")
         
-        # Retrieve notes created in the past day(s)
-        if not quiet:
-            console.print(f"\n[blue]Retrieving notes created in the past {days_back} day(s)...[/blue]")
-        
-        recent_notes = get_notes_created_in_past_day(etapi, days_back)
-        
-        if not recent_notes:
-            console.print("[yellow]No notes found in the specified time period.[/yellow]")
-            return
+
+        # Retrieve notes - either specific note or notes from past days
+        if note_id:
+            # Process specific note
+            if not quiet:
+                console.print(f"\n[blue]Retrieving specific note ID: {note_id}...[/blue]")
+            
+            try:
+                specific_note = etapi.get_note(note_id)
+                recent_modified_notes = [{
+                    'noteId': specific_note['noteId'],
+                    'title': specific_note['title'],
+                    'type': specific_note['type'],
+                    'isProtected': specific_note.get('isProtected', False),
+                    'dateModified': specific_note.get('dateModified', '')
+                }]
+                recent_created_notes = []  # No modified notes when processing specific note
+                if not quiet:
+                    console.print(f"[green]Found note: {specific_note['title']}[/green]")
+            except Exception as e:
+                console.print(Panel.fit(
+                    f"[bold red]✗ Could not find note ID {note_id}: {str(e)}[/bold red]",
+                    title="Note Not Found",
+                    border_style="red"
+                ))
+                sys.exit(1)
+        else:
+            # Retrieve notes created in the past day(s), keeping original logic for recent_created_notes
+            if not quiet:
+                console.print(f"\n[blue]Retrieving notes created in the past {days_back} day(s)...[/blue]")
+            
+            recent_created_notes = get_notes_created_in_past_day(etapi, days_back)
+            
+            if not quiet:
+                console.print(f"[blue]Retrieving notes modified in the past {days_back} day(s)...[/blue]")
+            
+            recent_modified_notes = get_notes_modified_in_past_days(etapi, days_back)
+                    
+            if not recent_created_notes:
+                console.print("[yellow]No notes found in the specified time period.[/yellow]")
+                return
         
         # Calculate and display the date range used for selection
         cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_back)
@@ -788,19 +1066,27 @@ def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose
         
         if not quiet:
             console.print(f"[dim]Date range: {cutoff_date_str} to {current_date_str}[/dim]")
-            console.print(f"[green]Found {len(recent_notes)} notes created in the past {days_back} day(s)[/green]")
+            console.print(f"[green]Found {len(recent_created_notes)} notes created in the past {days_back} day(s)[/green]")
         
-        # Apply max notes limit if specified
-        if max_notes is not None and len(recent_notes) > max_notes:
-            recent_notes = recent_notes[:max_notes]
+
+        # Apply max notes limit if specified to both created and modified notes
+        if max_notes is not None and len(recent_created_notes) > max_notes:
+            recent_created_notes = recent_created_notes[:max_notes]
             if not quiet:
-                console.print(f"[yellow]Limited to processing {max_notes} notes (out of {len(recent_notes)} total)[/yellow]")
+                console.print(f"[yellow]Limited to processing {max_notes} notes (out of {len(recent_created_notes)} total)[/yellow]")
         
-        # Filter notes with #link label
+        # Also apply max notes limit to modified notes
+        if max_notes is not None and len(recent_modified_notes) > max_notes:
+            recent_modified_notes = recent_modified_notes[:max_notes]
+            if not quiet:
+                console.print(f"[yellow]Limited to processing {max_notes} modified notes (out of {len(recent_modified_notes)} total)[/yellow]")
+        
+
+        # Filter notes with #link label from created notes
         link_notes = []
         other_notes = []
         
-        for note in recent_notes:
+        for note in recent_created_notes:
             # Check if note has #link label by searching for it
             search_result = etapi.search_note(search=f"note.noteId = '{note['noteId']}' #link")
             if search_result.get('results'):
@@ -811,13 +1097,28 @@ def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose
         if not quiet and link_notes:
             console.print(f"[blue]Found {len(link_notes)} notes with #link label[/blue]")
         
-        # Process revisions only for notes that will get internal links (not link notes)
+        # Filter notes with #clipType label from modified notes
+        read_notes = []
+        
+        for note in recent_modified_notes:
+            # Check if note has #clipType label by searching for it
+            search_result = etapi.search_note(search=f"note.noteId = '{note['noteId']}' #clipType")
+            if search_result.get('results'):
+                read_notes.append(note)
+        
+        if not quiet and read_notes:
+            console.print(f"[blue]Found {len(read_notes)} notes with #clipType label from modified notes[/blue]")
+        
+
+        # Process revisions for other_notes and read_notes
         # This ensures we save revisions before modifying content
-        if other_notes:
-            revision_results = process_note_revisions(etapi, other_notes, verbose and not quiet)
+        all_revision_notes = other_notes + read_notes
+        if all_revision_notes:
+            revision_results = process_note_revisions(etapi, all_revision_notes, verbose and not quiet)
         else:
             revision_results = {'total': 0, 'successful': 0, 'failed': 0, 'errors': []}
         
+
         # Add internal links only for notes without #link label
         link_results = add_internal_links_to_notes(etapi, other_notes, verbose and not quiet)
         
@@ -826,9 +1127,14 @@ def main(days_back: int, max_notes: int, env_file: str, is_global: bool, verbose
         if link_notes:
             link_processing_results = process_link_notes(etapi, link_notes, verbose and not quiet)
         
+        # Process read notes - no revisions saved for these either
+        read_processing_results = None
+        if read_notes:
+            read_processing_results = process_read_notes(etapi, read_notes, verbose and not quiet)
+        
         # Display summary
         if not quiet:
-            display_processing_summary(revision_results, link_results, link_processing_results)
+            display_processing_summary(revision_results, link_results, link_processing_results, read_processing_results)
         
         console.print("\n[bold green]✓ Daily notes processing completed successfully![/bold green]")
         
